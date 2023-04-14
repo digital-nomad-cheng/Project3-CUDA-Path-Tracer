@@ -4,6 +4,9 @@
 #include <thrust/execution_policy.h>
 #include <thrust/random.h>
 #include <thrust/remove.h>
+#include <thrust/partition.h>
+#include <thrust/device_ptr.h>
+#include <thrust/device_vector.h>
 
 #include "sceneStructs.h"
 #include "scene.h"
@@ -117,6 +120,17 @@ void pathtraceFree() {
 
 	checkCUDAError("pathtraceFree");
 }
+
+/**
+ * Test if the path segment is not finished in current iter.
+ */
+struct isNotFinished
+{
+	__host__ __device__
+		bool operator()(const PathSegment& pathSegment) {
+		return pathSegment.remainingBounces != 0;
+	}
+};
 
 /**
 * Generate PathSegments with rays from the camera through the screen into the
@@ -273,6 +287,53 @@ __global__ void shadeFakeMaterial(
 	}
 }
 
+__global__ void shadeBSDFMaterial(
+	int iter
+	, int num_paths
+	, ShadeableIntersection* shadeableIntersections
+	, PathSegment* pathSegments
+	, Material* materials
+)
+{
+	int idx = blockIdx.x * blockDim.x + threadIdx.x;
+	if (idx < num_paths)
+	{
+		ShadeableIntersection intersection = shadeableIntersections[idx];
+		if (intersection.t > 0.0f) { // if the intersection exists...
+		  // Set up the RNG
+		  // LOOK: this is how you use thrust's RNG! Please look at
+		  // makeSeededRandomEngine as well.
+			thrust::default_random_engine rng = makeSeededRandomEngine(iter, idx, 0);
+			thrust::uniform_real_distribution<float> u01(0, 1);
+
+			Material material = materials[intersection.materialId];
+			glm::vec3 materialColor = material.color;
+
+			// If the material indicates that the object was a light, "light" the ray
+			if (material.emittance > 0.0f) {
+				pathSegments[idx].color *= (materialColor * material.emittance);
+				pathSegments[idx].remainingBounces = 0;
+			}
+			// Otherwise, do some pseudo-lighting computation. This is actually more
+			// like what you would expect from shading in a rasterizer like OpenGL.
+			// TODO: replace this! you should be able to start with basically a one-liner
+			else {
+				glm::vec3 intersect = getPointOnRay(pathSegments[idx].ray, intersection.t);
+				scatterRay(pathSegments[idx], intersect, intersection.surfaceNormal, material, rng);
+				pathSegments[idx].remainingBounces -= 1;
+			}
+			// If there was no intersection, color the ray black.
+			// Lots of renderers use 4 channel color, RGBA, where A = alpha, often
+			// used for opacity, in which case they can indicate "no opacity".
+			// This can be useful for post-processing and image compositing.
+		}
+		else {
+			pathSegments[idx].color = glm::vec3(0.0f);
+			pathSegments[idx].remainingBounces = 0;
+		}
+	}
+}
+
 // Add the current iteration's output to the overall image
 __global__ void finalGather(int nPaths, glm::vec3* image, PathSegment* iterationPaths)
 {
@@ -345,7 +406,7 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 	// Shoot ray into scene, bounce between objects, push shading chunks
 
 	bool iterationComplete = false;
-	while (!iterationComplete) {
+	while (!iterationComplete && depth < traceDepth) {
 
 		// clean shading chunks
 		cudaMemset(dev_intersections, 0, pixelcount * sizeof(ShadeableIntersection));
@@ -367,20 +428,31 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 		// TODO:
 		// --- Shading Stage ---
 		// Shade path segments based on intersections and generate new rays by
-	  // evaluating the BSDF.
-	  // Start off with just a big kernel that handles all the different
-	  // materials you have in the scenefile.
-	  // TODO: compare between directly shading the path segments and shading
-	  // path segments that have been reshuffled to be contiguous in memory.
-
-		shadeFakeMaterial << <numblocksPathSegmentTracing, blockSize1d >> > (
+	    // evaluating the BSDF.
+	    // Start off with just a big kernel that handles all the different
+	    // materials you have in the scenefile.
+	    // TODO: compare between directly shading the path segments and shading
+	    // path segments that have been reshuffled to be contiguous in memory.
+		shadeBSDFMaterial << <numblocksPathSegmentTracing, blockSize1d >> > (
 			iter,
 			num_paths,
 			dev_intersections,
 			dev_paths,
 			dev_materials
 			);
-		iterationComplete = true; // TODO: should be based off stream compaction results.
+		//@ stream compaction
+		// stable_partition is much like partition : it reorders the elements in the range
+		// [first, last) based on the function object pred, such that all of the elements
+		// that satisfy pred precede all of the elements that fail to satisfy it. The 
+		// postcondition is that, for some iterator middle in the range [first, last), 
+		// pred(*i) is true for every iterator i in the range [first,middle) and false for
+		// every iterator i in the range [middle, last). The return value of 
+		// stable_partition is middle.
+		dev_path_end = thrust::stable_partition(thrust::device, dev_paths, 
+			dev_path_end, isNotFinished());
+		// from [dev_path, dev_path_end) all paths are not finished
+		num_paths = dev_path_end - dev_paths;
+		iterationComplete = (num_paths == 0); // TODO: should be based off stream compaction results.
 
 		if (guiData != NULL)
 		{
@@ -390,7 +462,7 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 
 	// Assemble this iteration and apply it to the image
 	dim3 numBlocksPixels = (pixelcount + blockSize1d - 1) / blockSize1d;
-	finalGather << <numBlocksPixels, blockSize1d >> > (num_paths, dev_image, dev_paths);
+	finalGather << <numBlocksPixels, blockSize1d >> > (pixelcount, dev_image, dev_paths);
 
 	///////////////////////////////////////////////////////////////////////////
 
