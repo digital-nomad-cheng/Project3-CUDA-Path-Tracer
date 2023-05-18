@@ -132,6 +132,10 @@ struct isNotFinished
 	}
 };
 
+__host__ __device__ bool sortByMaterial(const ShadeableIntersection a, const ShadeableIntersection b) {
+	return a.materialId > b.materialId;
+}
+
 /**
 * Generate PathSegments with rays from the camera through the screen into the
 * scene, which is the first bounce of rays.
@@ -406,6 +410,7 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 	// Shoot ray into scene, bounce between objects, push shading chunks
 
 	bool iterationComplete = false;
+	float shading_time = 0.0f;
 	while (!iterationComplete && depth < traceDepth) {
 
 		// clean shading chunks
@@ -433,6 +438,15 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 	    // materials you have in the scenefile.
 	    // TODO: compare between directly shading the path segments and shading
 	    // path segments that have been reshuffled to be contiguous in memory.
+
+		//@ sort by material
+		if (guiData != NULL && guiData->SortByMaterial)
+			thrust::stable_sort_by_key(thrust::device, dev_intersections, dev_intersections + num_paths, dev_paths, sortByMaterial);
+		
+		cudaEvent_t start, stop;
+		cudaEventCreate(&start);
+		cudaEventCreate(&stop);
+		cudaEventRecord(start);
 		shadeBSDFMaterial << <numblocksPathSegmentTracing, blockSize1d >> > (
 			iter,
 			num_paths,
@@ -440,6 +454,12 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 			dev_paths,
 			dev_materials
 			);
+		cudaEventRecord(stop);
+		cudaEventSynchronize(stop);
+		float milliseconds = 0.0f;
+		cudaEventElapsedTime(&milliseconds, start, stop);
+		shading_time += milliseconds;
+
 		//@ stream compaction
 		// stable_partition is much like partition : it reorders the elements in the range
 		// [first, last) based on the function object pred, such that all of the elements
@@ -459,7 +479,10 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 			guiData->TracedDepth = depth;
 		}
 	}
-
+	if (guiData != NULL)
+	{
+		guiData->ShadingTime = shading_time;
+	}
 	// Assemble this iteration and apply it to the image
 	dim3 numBlocksPixels = (pixelcount + blockSize1d - 1) / blockSize1d;
 	finalGather << <numBlocksPixels, blockSize1d >> > (pixelcount, dev_image, dev_paths);

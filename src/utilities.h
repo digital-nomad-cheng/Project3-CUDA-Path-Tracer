@@ -17,8 +17,10 @@
 class GuiDataContainer
 {
 public:
-    GuiDataContainer() : TracedDepth(0) {}
+    GuiDataContainer() : TracedDepth(0), ShadingTime(0.0f), SortByMaterial(false) {}
     int TracedDepth;
+    float ShadingTime; 
+    bool SortByMaterial;
 };
 
 namespace utilityCore {
