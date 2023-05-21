@@ -216,6 +216,9 @@ void RenderImGui()
 	if (ImGui::Button("Sort By Material"))                            // Buttons return true when clicked (most widgets return true when edited/activated)
 		imguiData->SortByMaterial = !(imguiData->SortByMaterial);
 	ImGui::Checkbox("Sort By Material", &(imguiData->SortByMaterial));
+	if (ImGui::Button("Use First Cache"))                            // Buttons return true when clicked (most widgets return true when edited/activated)
+		imguiData->FirstCache = !(imguiData->FirstCache);
+	ImGui::Checkbox(" Use First Cache", &(imguiData->FirstCache));
 	//ImGui::SameLine();
 	//ImGui::Text("counter = %d", counter);
 	ImGui::Text("Traced Depth %d", imguiData->TracedDepth);
